@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens do Rentou.
+ * Azul-marinho = marca e confiança; verde = economia e melhores ofertas;
+ * branco predominante; cinzas (slate) para divisões e textos.
+ */
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --color-navy-50: #eef3fb;
+  --color-navy-100: #d9e3f5;
+  --color-navy-200: #b3c7ea;
+  --color-navy-300: #839fd6;
+  --color-navy-400: #5476bd;
+  --color-navy-500: #3457a0;
+  --color-navy-600: #254283;
+  --color-navy-700: #1c3368;
+  --color-navy-800: #142650;
+  --color-navy-900: #0d1b3a;
+  --color-navy-950: #081127;
+
+  --color-saving-50: #ecfdf3;
+  --color-saving-100: #d1fadf;
+  --color-saving-500: #12b76a;
+  --color-saving-600: #039855;
+  --color-saving-700: #027a48;
+  --color-saving-800: #05603a;
+
+  --shadow-card: 0 1px 2px rgb(13 27 58 / 0.04), 0 4px 16px rgb(13 27 58 / 0.06);
+  --shadow-elevated: 0 12px 40px rgb(13 27 58 / 0.16);
+
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  @keyframes shimmer {
+    from { background-position: -400px 0; }
+    to { background-position: 400px 0; }
+  }
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-white text-slate-800 antialiased;
+}
+
+/* Foco visível e consistente para navegação por teclado. */
+:focus-visible {
+  outline: 2px solid var(--color-navy-500);
+  outline-offset: 2px;
+}
+
+/* Remove o ícone de calendário/relógio duplicado em alguns navegadores mobile. */
+input[type="date"],
+input[type="time"] {
+  min-height: 1.5rem;
+}
