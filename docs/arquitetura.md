@@ -1,7 +1,7 @@
 # Rentou App: plano de arquitetura
 
 > **Compare, economize, viaje.**
-> Documento vivo. Versão 1.0 (18/11/2026). Escrito como material de estudo: cada decisão vem com teoria, motivo, alternativas, trade-offs e perguntas de revisão.
+> Documento vivo. Versão 1.1 (18/11/2026), contratos alinhados ao frontend. Escrito como material de estudo: cada decisão vem com teoria, motivo, alternativas, trade-offs e perguntas de revisão.
 
 ---
 
@@ -268,7 +268,7 @@ com.rentou
 │   └── domain/     EquivalenceKey, EquivalenceGrouper, BestOfferSelector,
 │                   ComparisonGroup
 └── quote/                         # personalização e recálculo
-    ├── api/        QuoteController, QuoteRequest, QuoteResponse
+    ├── api/        QuoteController (recebe SelectionRequest, devolve SearchResponse)
     ├── application/QuoteService
     └── domain/     Quote, PriceBreakdown, PricingRules
 ```
@@ -676,13 +676,16 @@ Catálogo canônico inicial (do requisito):
 | `MILEAGE_LIMITED` | Quilometragem | Km controlada (com franquia diária de km) |
 | `ONE_WAY_RETURN` | Taxa | Devolução em outra loja |
 
-### Os três níveis de equivalência
+Na API, esses códigos aparecem de forma mais enxuta: `protectionLevel` (`BASIC | INTERMEDIATE | FULL`), `thirdPartyProtection` (booleano), `addons` (`ADDITIONAL_DRIVER | CHILD_SEAT | INFANT_SEAT | BOOSTER_SEAT | GPS | WIFI`) e `mileage` (`OFFER_DEFAULT | FREE | CONTROLLED`). Veja a seção 11.
+
+### Os níveis de equivalência
 
 | Nível | Significado | O que a interface faz |
 |---|---|---|
 | `CONFIRMED` | Atributos verificados e revisados por uma pessoa; atende ao critério canônico | Compara preços normalmente |
 | `PARTIAL` | Atende ao critério mínimo, mas com diferença relevante (ex.: franquia maior) | Compara, com aviso: "Cobertura semelhante, franquia diferente" |
 | `UNCONFIRMED` | Sem mapeamento revisado, ou atributos desconhecidos | **Não compara**. Mostra: "Não confirmamos equivalência deste item nesta locadora" |
+| `UNAVAILABLE` | A locadora não oferece nenhum produto desse tipo | **Não compara**. Mostra: "Item não oferecido por esta locadora" |
 
 Ausência de mapeamento é **sempre** `UNCONFIRMED`. O sistema é *fail-safe*: na dúvida, não afirma.
 
@@ -888,7 +891,7 @@ Ao marcar "Cadeirinha" e "Proteção completa", os preços das três locadoras p
 
 ### Como funciona
 
-As ofertas de uma busca ficam em cache no servidor (Caffeine, TTL 15 min) com o `searchId`. A cotação recebe a seleção canônica e calcula para **todas as ofertas do grupo**:
+As ofertas de uma busca ficam em cache no servidor (Caffeine, TTL 15 min) com o `searchId`. A cotação recebe a seleção canônica, recalcula **todas as ofertas da busca** e refaz os grupos de equivalência (a seleção pode mudar quem é comparável com quem):
 
 ```mermaid
 sequenceDiagram
@@ -901,21 +904,22 @@ sequenceDiagram
     U->>FE: marca Proteção completa + Cadeirinha
     FE->>FE: debounce 300 ms
     FE->>API: POST /searches/{id}/quotes
-    API->>QS: quote(searchId, groupKey, selection)
-    QS->>C: ofertas do grupo
+    API->>QS: quote(searchId, selection)
+    QS->>C: ofertas da busca
     loop cada oferta
       QS->>N: resolver produtos canônicos → produto da locadora
       N-->>QS: produto + nível de equivalência
       QS->>QS: PricingRules.calculate()
     end
-    QS-->>API: cotações + diferença entre locadoras
-    API-->>FE: 200 QuoteResponse
+    QS->>QS: reagrupar + BestOfferSelector
+    QS-->>API: busca recalculada
+    API-->>FE: 200 SearchResultDto
     FE-->>U: preços atualizados
 ```
 
-Para cada locadora, o resultado traz o detalhamento: preço original, adicionais, taxas, preço final, diferença para a mais barata e, item a item, o nível de equivalência. Se a locadora não tem um item equivalente confirmado, o item aparece como `UNAVAILABLE` ou `UNCONFIRMED` e **a oferta sai da comparação de preço** para aquela seleção (é exibida, mas sem selo e com aviso).
+Para cada oferta, o resultado traz o detalhamento (`price`: preço base, adicionais, taxas, total) e, item a item, o nível de equivalência (`selectedItems`). Se a locadora não tem um item equivalente confirmado, o item aparece como `UNAVAILABLE` ou `UNCONFIRMED` e **a oferta sai da comparação de preço** para aquela seleção (`comparable: false`: é exibida, mas sem selo e com aviso). A diferença entre locadoras vem dos totais dentro de cada grupo.
 
-Se o cache expirou: `410 Gone` com código `SEARCH_EXPIRED`, e o frontend refaz a busca automaticamente.
+Se o cache expirou: `404` com código `SEARCH_EXPIRED`, e o frontend refaz a busca automaticamente.
 
 ### Trade-offs
 
@@ -933,203 +937,190 @@ Se o cache expirou: `410 Gone` com código `SEARCH_EXPIRED`, e o frontend refaz 
 
 ## 11. Contratos da API REST
 
+> **Fonte da verdade:** os contratos implementados no frontend em [`rentou-frontend/src/lib/api/contracts.ts`](../rentou-frontend/src/lib/api/contracts.ts). Os DTOs Java do backend devem espelhar esse arquivo campo a campo. Quando o backend existir, a direção se inverte: o OpenAPI gerado pelo backend passa a ser a referência e o `contracts.ts` é gerado a partir dele (seção 3).
+
 ### Princípios
 
 - Base: `/api/v1`. **Versionamento na URL**: simples e visível. A alternativa (versão em header) é mais "pura" e mais difícil de testar no navegador.
-- JSON em `camelCase`. Dinheiro como string decimal. Datas ISO-8601.
+- JSON em `camelCase`. Dinheiro como string decimal (`{ "amount": "189.90", "currency": "BRL" }`). Datas ISO-8601 locais sem fuso (`"2026-12-20T10:00"`), interpretadas em `America/Sao_Paulo`.
 - Recursos com substantivos; verbos HTTP com semântica correta.
 - Erros em **RFC 9457 Problem Details** (`application/problem+json`).
 - Documentação gerada (springdoc-openapi) em `/v3/api-docs` e Swagger UI em `/swagger-ui`.
-- Todas as respostas de busca e oferta trazem `"demo": true` enquanto os dados forem simulados.
+- Toda resposta de busca e de oferta traz `"demo": true` enquanto os dados forem simulados.
 
 ### Visão geral
 
-| Método | Rota | Descrição |
-|---|---|---|
-| GET | `/api/v1/locations?q=gru` | Autocomplete de lojas/cidades |
-| POST | `/api/v1/searches` | Executa uma busca e retorna ofertas + grupos |
-| GET | `/api/v1/searches/{searchId}` | Recupera uma busca em cache (refresh da página) |
-| GET | `/api/v1/offers/{offerId}` | Detalhes completos de uma oferta |
-| POST | `/api/v1/searches/{searchId}/quotes` | Recalcula preços de um grupo com a seleção do usuário |
-| GET | `/api/v1/catalog/products` | Lista produtos canônicos (proteções, adicionais) para montar a tela de personalização |
-| GET | `/api/v1/offers/{offerId}/redirect` | 302 para a página de reserva da locadora |
+| Método | Rota | Corpo / parâmetros | Resposta |
+|---|---|---|---|
+| GET | `/api/v1/locations?q=gru` | | `LocationDto[]` (autocomplete) |
+| GET | `/api/v1/locations/{id}` | | `LocationDto` ou 404 |
+| POST | `/api/v1/searches` | `SearchRequest` | `SearchResultDto` (seleção padrão) |
+| POST | `/api/v1/searches/{searchId}/quotes` | `SelectionDto` | `SearchResultDto` recalculado com a seleção |
+| GET | `/api/v1/offers/{offerId}?protectionLevel=FULL&thirdPartyProtection=true&mileage=FREE&addons=GPS&addons=CHILD_SEAT` | seleção na query string | `OfferDetailsDto` |
+| GET | `/api/v1/offers/{offerId}/redirect` | | 302 para a página de reserva da locadora (futuro) |
 
-**Por que `POST /searches` e não `GET /offers?pickup=...`?** Uma busca tem muitos parâmetros e cria um recurso (com id, em cache, usado depois na cotação). `POST` que cria recurso é semanticamente correto. O custo: `POST` não é cacheável por CDN. Mitigação: o frontend mantém os critérios na **URL da página** (`/resultados?...`), então a página continua compartilhável; só a chamada à API é `POST`.
+### Duas decisões de contrato que valem estudo
 
-**Por que um endpoint de redirect?** Centraliza a montagem do link (parâmetros de afiliado no futuro), permite medir cliques (métrica de negócio) e evita expor lógica de deep link no frontend. Trade-off: um salto de rede a mais.
+**1. A cotação devolve a busca inteira, não só um grupo.**
+A seleção (proteção, adicionais, quilometragem) muda **quais ofertas são equivalentes**: uma oferta comparável com "Proteção básica" pode deixar de ser com "Proteção completa" se a locadora não tiver um produto confirmado. Então não basta recalcular preços de um grupo fixo; é preciso **reagrupar** e reescolher a melhor oferta. Devolver o `SearchResultDto` inteiro mantém o frontend simples (um único formato de tela) e deixa o backend como dono da regra.
+Trade-off: a resposta é maior (dezenas de ofertas, poucos KB com gzip). Se crescer muito, dá para devolver só o que mudou.
+
+**2. Detalhes da oferta recebem a seleção na query string (`GET`).**
+`GET` é **idempotente e cacheável**, e a URL da tela de detalhes pode ser compartilhada mantendo a personalização. A alternativa (`POST /offers/{id}/details` com corpo) quebraria essas duas propriedades sem ganho real, já que a seleção é pequena.
+
+**Por que `POST /searches` e não `GET /offers?pickup=...`?** Uma busca cria um recurso (com `searchId`, em cache, usado depois na cotação e nos detalhes). `POST` que cria recurso é semanticamente correto. O custo: `POST` não é cacheável por CDN. Mitigação: o frontend mantém os critérios na **URL da página** (`/resultados?...`), então a página continua compartilhável.
+
+**Por que um endpoint de redirect (futuro)?** Centraliza a montagem do link (parâmetros de afiliado), permite medir cliques e evita lógica de deep link no frontend. Trade-off: um salto de rede a mais. Hoje o `OfferDto.bookingUrl` já entrega o link direto; o redirect entra quando houver acordo comercial.
 
 ### `POST /api/v1/searches`
 
-Request:
+Request (`SearchRequest`):
 
 ```json
 {
-  "pickupLocationId": "GRU-AEROPORTO",
-  "dropoffLocationId": "GRU-AEROPORTO",
+  "pickupLocationId": "GRU",
+  "dropoffLocationId": "GRU",
   "pickupAt": "2026-12-20T10:00",
   "dropoffAt": "2026-12-27T10:00",
   "driverAge": 30
 }
 ```
 
-Validações (seção 12): campos obrigatórios; `dropoffAt` depois de `pickupAt`; `pickupAt` não no passado; período máximo (ex.: 60 dias); `driverAge` entre 18 e 99; locais existentes. "Devolver em loja diferente" é inferido de `dropoffLocationId != pickupLocationId` (o checkbox é só interface; não duplicamos informação no contrato).
+Validações (seção 12): campos obrigatórios; `dropoffAt` depois de `pickupAt`; `pickupAt` não no passado; período máximo (ex.: 60 dias); `driverAge` entre 18 e 99; locais existentes. "Devolver em loja diferente" é inferido de `dropoffLocationId != pickupLocationId` e volta como `criteria.oneWay` (o checkbox é só interface; não duplicamos informação no contrato).
 
-Response `201 Created` (com header `Location: /api/v1/searches/{id}`):
+Response (`SearchResultDto`, resumida):
 
 ```json
 {
   "searchId": "s_8f3a2c",
   "demo": true,
-  "expiresAt": "2026-11-18T04:45:00Z",
   "criteria": {
-    "pickupLocation": { "id": "GRU-AEROPORTO", "name": "Aeroporto de Guarulhos", "city": "Guarulhos", "state": "SP" },
-    "dropoffLocation": { "id": "GRU-AEROPORTO", "name": "Aeroporto de Guarulhos", "city": "Guarulhos", "state": "SP" },
+    "pickupLocation":  { "id": "GRU", "name": "Aeroporto de Guarulhos", "city": "Guarulhos", "state": "SP", "type": "AIRPORT", "iataCode": "GRU" },
+    "dropoffLocation": { "id": "GRU", "name": "Aeroporto de Guarulhos", "city": "Guarulhos", "state": "SP", "type": "AIRPORT", "iataCode": "GRU" },
     "pickupAt": "2026-12-20T10:00",
     "dropoffAt": "2026-12-27T10:00",
     "driverAge": 30,
-    "oneWay": false,
-    "estimatedRentalDays": 7
+    "oneWay": false
   },
+  "rentalDays": 7,
+  "selection": { "protectionLevel": "BASIC", "thirdPartyProtection": false, "addons": [], "mileage": "OFFER_DEFAULT" },
   "providers": [
-    { "id": "LOCALIZA", "name": "Localiza", "status": "OK", "offerCount": 4 },
-    { "id": "MOVIDA",   "name": "Movida",   "status": "OK", "offerCount": 4 },
-    { "id": "UNIDAS",   "name": "Unidas",   "status": "TIMEOUT", "offerCount": 0 }
+    { "id": "LOCALIZA", "name": "Localiza", "accentColor": "#0B7A3E", "status": "OK" },
+    { "id": "MOVIDA",   "name": "Movida",   "accentColor": "#F26B21", "status": "OK" },
+    { "id": "UNIDAS",   "name": "Unidas",   "accentColor": "#1E4FA0", "status": "TIMEOUT", "message": "A locadora não respondeu a tempo." }
   ],
   "offers": [
     {
-      "offerId": "o_LOCALIZA_7d1e",
-      "provider": { "id": "LOCALIZA", "name": "Localiza", "logoUrl": "/providers/localiza.svg" },
+      "id": "o_LOCALIZA_compact",
+      "providerId": "LOCALIZA",
       "vehicle": {
-        "category": "COMPACT",
-        "categoryLabel": "Compacto",
-        "bodyType": "HATCH",
-        "modelName": "Hyundai HB20 ou similar",
-        "imageUrl": "/vehicles/compact-hatch.png",
-        "transmission": "MANUAL",
-        "airConditioning": true,
-        "passengers": 5,
-        "luggage": { "large": 1, "small": 1 }
+        "category": "COMPACT", "categoryLabel": "Compacto", "bodyType": "HATCH",
+        "modelName": "Hyundai HB20 ou similar", "transmission": "MANUAL",
+        "airConditioning": true, "passengers": 5, "doors": 4, "largeBags": 1, "smallBags": 1
       },
-      "rentalDays": 7,
-      "dailyRate": { "amount": "119.90", "currency": "BRL" },
-      "basePrice": { "amount": "839.30", "currency": "BRL" },
-      "fees": [
-        { "code": "ADMIN_FEE", "label": "Taxa administrativa", "amount": { "amount": "100.71", "currency": "BRL" } }
+      "mileage": { "type": "FREE" },
+      "protection": {
+        "level": "BASIC", "commercialName": "Proteção Básica",
+        "deductible": { "amount": "3500.00", "currency": "BRL" },
+        "coverages": ["Roubo e furto", "Colisão"]
+      },
+      "thirdPartyProtection": null,
+      "price": {
+        "dailyRate": { "amount": "119.90", "currency": "BRL" },
+        "rentalDays": 7,
+        "baseTotal": { "amount": "839.30", "currency": "BRL" },
+        "discounts": [],
+        "extras": [],
+        "extrasTotal": { "amount": "0.00", "currency": "BRL" },
+        "fees": [
+          { "code": "ADMIN_FEE", "label": "Taxa administrativa", "amount": { "amount": "100.72", "currency": "BRL" }, "detail": "12% sobre as diárias" }
+        ],
+        "feesTotal": { "amount": "100.72", "currency": "BRL" },
+        "total": { "amount": "940.02", "currency": "BRL" }
+      },
+      "selectedItems": [
+        { "code": "PROTECTION_BASIC", "label": "Proteção básica", "status": "CONFIRMED", "commercialName": "Proteção Básica" }
       ],
-      "totalPrice": { "amount": "940.01", "currency": "BRL" },
-      "includedProtection": {
-        "canonicalCode": "PROTECTION_BASIC",
-        "providerName": "Proteção Básica",
-        "equivalence": "CONFIRMED"
-      },
-      "mileage": { "type": "UNLIMITED" },
-      "groupKey": "g_COMPACT_MANUAL_AC_5_UNLIMITED_PROTECTION_BASIC",
-      "bookingAvailable": true
+      "comparable": true,
+      "comparabilityNotes": [],
+      "fuelPolicy": "Devolver com o mesmo nível de combustível.",
+      "cancellationPolicy": null,
+      "bookingUrl": "https://www.exemplo-locadora.com.br"
     }
   ],
   "groups": [
     {
-      "groupKey": "g_COMPACT_MANUAL_AC_5_UNLIMITED_PROTECTION_BASIC",
-      "offerIds": ["o_LOCALIZA_7d1e", "o_MOVIDA_a91b"],
+      "id": "g_COMPACT_MANUAL_AC_FREE_BASIC",
+      "label": "Compacto · Manual · Km livre · Proteção básica",
+      "offerIds": ["o_LOCALIZA_compact", "o_MOVIDA_compact"],
       "result": "WINNER",
-      "bestOfferId": "o_LOCALIZA_7d1e",
-      "savings": { "amount": "42.30", "currency": "BRL" },
-      "comparedProviders": ["LOCALIZA", "MOVIDA"]
+      "bestOfferId": "o_LOCALIZA_compact",
+      "savings": { "amount": "42.30", "currency": "BRL" }
     }
-  ],
-  "filters": {
-    "categories": ["ECONOMY", "COMPACT", "SEDAN", "SUV"],
-    "bodyTypes": ["HATCH", "SEDAN", "SUV"],
-    "transmissions": ["MANUAL", "AUTOMATIC"],
-    "passengers": [4, 5, 7]
-  }
+  ]
 }
 ```
 
-`result` pode ser `WINNER`, `TIE` ou `NO_COMPARISON`. `filters` traz as facetas disponíveis para montar os filtros; a **filtragem em si acontece no frontend** (são poucas dezenas de ofertas, e filtrar localmente é instantâneo). Se o volume crescer, os filtros viram parâmetros da API.
+Pontos do contrato:
 
-### `GET /api/v1/offers/{offerId}`
-
-Tudo do card, mais: `protections[]` (incluídas e opcionais, cada uma com `coverages[]`, `deductible` e `equivalence`), `addons[]` disponíveis com preço e unidade, `fuelPolicy` (`FULL_TO_FULL`...), `cancellationPolicy` (opcional, texto + prazos), `bookingUrl` (via redirect), `disclaimer`.
+- `providers[].status`: `OK | NOT_AVAILABLE_AT_LOCATION | ERROR | TIMEOUT`. Falha parcial não é erro HTTP.
+- `groups[].result`: `WINNER | TIE | NO_COMPARISON`. `offerIds` vem ordenado do menor para o maior total. Ofertas com `comparable: false` ficam **fora de qualquer grupo**.
+- `selectedItems[].status`: `CONFIRMED | PARTIAL | UNCONFIRMED | UNAVAILABLE`. Só `CONFIRMED` e `PARTIAL` somam no total. `UNAVAILABLE` (a locadora não vende o item) é diferente de `UNCONFIRMED` (vende algo parecido, mas a equivalência não foi confirmada): a mensagem para o usuário muda, e por isso são dois valores.
+- **Filtros** (categoria, câmbio, ar, passageiros, carroceria) são aplicados **no frontend** sobre `offers`: são poucas dezenas de ofertas e filtrar localmente é instantâneo. Se o volume crescer, viram parâmetros da API.
 
 ### `POST /api/v1/searches/{searchId}/quotes`
 
-Request:
+Request (`SelectionDto`):
 
 ```json
 {
-  "groupKey": "g_COMPACT_MANUAL_AC_5_UNLIMITED_PROTECTION_BASIC",
-  "protection": "PROTECTION_FULL",
-  "addons": [
-    { "code": "ADDON_CHILD_SEAT", "quantity": 1 },
-    { "code": "ADDON_EXTRA_DRIVER", "quantity": 1 }
-  ],
-  "mileage": "MILEAGE_UNLIMITED"
+  "protectionLevel": "FULL",
+  "thirdPartyProtection": true,
+  "addons": ["CHILD_SEAT", "ADDITIONAL_DRIVER"],
+  "mileage": "FREE"
 }
 ```
 
-Response `200`:
+Response: o mesmo `SearchResultDto`, com `selection` igual à enviada, `price.extras` preenchido, `selectedItems` com o status de cada item por oferta, e `groups` recalculados. Exemplo de um item não confirmado numa oferta:
 
 ```json
 {
-  "searchId": "s_8f3a2c",
-  "demo": true,
-  "quotes": [
-    {
-      "offerId": "o_LOCALIZA_7d1e",
-      "provider": "LOCALIZA",
-      "comparable": true,
-      "breakdown": {
-        "basePrice":   { "amount": "839.30", "currency": "BRL" },
-        "protections": { "amount": "280.00", "currency": "BRL" },
-        "addons":      { "amount": "245.00", "currency": "BRL" },
-        "fees":        { "amount": "100.71", "currency": "BRL" },
-        "total":       { "amount": "1465.01", "currency": "BRL" }
-      },
-      "items": [
-        { "code": "PROTECTION_FULL",   "providerName": "Proteção Super", "equivalence": "CONFIRMED", "price": { "amount": "280.00", "currency": "BRL" } },
-        { "code": "ADDON_CHILD_SEAT",  "providerName": "Cadeirinha",     "equivalence": "CONFIRMED", "price": { "amount": "140.00", "currency": "BRL" } },
-        { "code": "ADDON_EXTRA_DRIVER","providerName": "Condutor extra", "equivalence": "CONFIRMED", "price": { "amount": "105.00", "currency": "BRL" } }
-      ],
-      "differenceToCheapest": { "amount": "0.00", "currency": "BRL" }
-    },
-    {
-      "offerId": "o_MOVIDA_a91b",
-      "provider": "MOVIDA",
-      "comparable": false,
-      "notComparableReason": "PROTECTION_FULL sem equivalência confirmada nesta locadora",
-      "breakdown": { "...": "..." },
-      "items": [
-        { "code": "PROTECTION_FULL", "providerName": "Proteção Total", "equivalence": "UNCONFIRMED", "price": { "amount": "245.00", "currency": "BRL" } }
-      ],
-      "differenceToCheapest": null
-    }
-  ],
-  "bestOfferId": "o_LOCALIZA_7d1e",
-  "savings": null
+  "code": "PROTECTION_FULL",
+  "label": "Proteção completa",
+  "status": "UNCONFIRMED",
+  "commercialName": "Proteção Total",
+  "note": "Coberturas diferentes do critério do Rentou para proteção completa."
 }
 ```
+
+Essa oferta volta com `comparable: false` e uma entrada em `comparabilityNotes`, e a interface mostra o aviso em vez do selo.
+
+### `GET /api/v1/offers/{offerId}`
+
+Response (`OfferDetailsDto`): `searchId`, `demo`, `criteria`, `rentalDays`, `selection`, `provider`, `offer` (o `OfferDto` completo com a seleção aplicada), `group` (o grupo de equivalência, ou `null`) e `equivalentOffers[]` (`offerId`, `provider`, `total`) para mostrar a diferença entre locadoras.
 
 ### Códigos de status
 
 | Status | Quando |
 |---|---|
 | 200 / 201 | Sucesso |
-| 400 | JSON malformado / tipo errado |
-| 404 | `offerId` ou `locationId` inexistente |
-| 410 | Busca expirada (`SEARCH_EXPIRED`) |
-| 422 | Validação de negócio (datas, idade) |
+| 400 | JSON malformado, tipo errado ou campo inválido (com `errors[]`) |
+| 404 | `offerId`, `locationId` ou `searchId` inexistente ou expirado |
 | 502 | Todas as locadoras falharam (`ALL_PROVIDERS_FAILED`) |
 | 500 | Erro inesperado (nunca vaza stack trace) |
 
-> Falha **parcial** de locadoras não é erro HTTP: é `201` com `status` por locadora. Erro HTTP é para quando a requisição como um todo não pôde ser atendida.
+Duas escolhas aqui, alinhadas ao que o frontend já trata em `api-error.ts`:
+
+- **Validação usa 400** (e não 422). Há quem separe "não entendi o JSON" (400) de "entendi, mas a regra não permite" (422). A separação é mais precisa; usar só 400 é mais simples para o cliente. Escolhemos a simplicidade; o campo `code` do Problem Details já diferencia os casos para quem precisar.
+- **Busca expirada usa 404** (e não 410 Gone). 410 é semanticamente mais exato ("existiu, não existe mais"), mas o cliente reage do mesmo jeito: refazer a busca. Se um dia a reação for diferente, migramos para 410.
 
 ### Perguntas de revisão (seção 11)
 
-1. Por que 422 e não 400 para "devolução antes da retirada"? (Há quem use 400 para ambos: defenda sua escolha.)
-2. Por que a filtragem fica no frontend nesta versão? O que te faria mudar?
-3. Por que o contrato não tem um campo `differentReturnStore`?
-4. Quando uma locadora falha, por que a resposta ainda é 201?
+1. Por que a cotação devolve a busca inteira e não só os preços de um grupo? O que a seleção muda além do preço?
+2. Por que a tela de detalhes usa `GET` com a seleção na query string?
+3. Qual a diferença, para o usuário, entre `UNCONFIRMED` e `UNAVAILABLE`?
+4. Defenda 400 ou 422 para "devolução antes da retirada". O que muda para o cliente?
+5. Quando uma locadora falha, por que a resposta ainda é sucesso?
 
 ---
 
@@ -1178,7 +1169,7 @@ Todo erro tem o mesmo formato, para o frontend tratar de forma genérica:
 {
   "type": "https://rentou.app/errors/validation",
   "title": "Dados de pesquisa inválidos",
-  "status": 422,
+  "status": 400,
   "detail": "Revise os campos destacados.",
   "instance": "/api/v1/searches",
   "code": "VALIDATION_ERROR",
@@ -1191,8 +1182,8 @@ Todo erro tem o mesmo formato, para o frontend tratar de forma genérica:
 
 ```java
 public enum ErrorCode {
-    VALIDATION_ERROR(422), LOCATION_NOT_FOUND(404), OFFER_NOT_FOUND(404),
-    SEARCH_EXPIRED(410), ALL_PROVIDERS_FAILED(502), INTERNAL_ERROR(500);
+    VALIDATION_ERROR(400), LOCATION_NOT_FOUND(404), OFFER_NOT_FOUND(404),
+    SEARCH_EXPIRED(404), ALL_PROVIDERS_FAILED(502), INTERNAL_ERROR(500);
     // status HTTP associado
 }
 
@@ -1480,17 +1471,19 @@ rentou-frontend/src/
 │   └── layout/               # Header, Footer, DemoBanner
 ├── lib/
 │   ├── api/
-│   │   ├── types.ts          # gerado do OpenAPI (ou espelhado à mão até o backend existir)
-│   │   ├── rentou-api.ts     # interface RentouApi
-│   │   ├── http-api.ts       # implementação real (fetch)
-│   │   └── mock-api.ts       # implementação mock local (enquanto não há backend)
+│   │   ├── contracts.ts      # DTOs (hoje a referência; depois gerado do OpenAPI)
+│   │   ├── rentou-api.ts     # interface RentouApi (porta)
+│   │   ├── http-rentou-api.ts# implementação real (fetch)
+│   │   ├── mock-rentou-api.ts# implementação mock local (enquanto não há backend)
+│   │   ├── api-error.ts      # ApiError sobre ProblemDetail + mensagens amigáveis
+│   │   └── index.ts          # composition root: escolhe mock ou http
 │   ├── format/               # formatMoney (pt-BR, BRL), formatDate, formatPeriod
 │   ├── validation/           # schema do formulário (zod), usado na Home e na URL
 │   └── search-params.ts      # serializa/desserializa critérios <-> URL
 └── hooks/                    # useSearch, useQuote (debounce + AbortController)
 ```
 
-A interface `RentouApi` no frontend é o **mesmo padrão de portas e adaptadores** do backend: a interface não muda quando trocamos o mock pelo HTTP real. Seleção por variável de ambiente (`NEXT_PUBLIC_API_MODE=mock|http`).
+A interface `RentouApi` no frontend é o **mesmo padrão de portas e adaptadores** do backend: a interface não muda quando trocamos o mock pelo HTTP real. Seleção por variável de ambiente (`NEXT_PUBLIC_RENTOU_API_MODE=mock|http` e `NEXT_PUBLIC_RENTOU_API_URL`).
 
 ### Server vs Client Components
 
